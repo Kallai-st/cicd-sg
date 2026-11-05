@@ -42,3 +42,15 @@ If any test fails, pytest exits with a non-zero code, the job fails, and later j
 .venv\Scripts\Activate.ps1
 python -m pytest -v
 ```
+
+## Demonstration: a failing test blocks the merge
+
+To verify the pipeline, a test was intentionally broken on a separate branch (`demo/2-failing-test`) and a pull request was opened. The `Run tests` check failed, and branch protection prevented the merge. The PR was closed without merging.
+
+**Failed check on the pull request – merging is blocked:**
+
+![Failed CI check blocking the merge](images/02-ci-failed-pr.png)
+
+**The test log shows which assertion failed:**
+
+![Pytest failure in the GitHub Actions log](images/02-ci-failed-log.png)
