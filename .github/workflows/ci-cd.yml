@@ -63,7 +63,17 @@ jobs:
         run: curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 2 http://localhost:8000/health
 
       - name: Smoke test - check non-root user
-        run: test "$(docker exec smoke whoami)" = "appuser"
+        run: test "$(docker exec smoke whoami)" = "appuser"  
+
+      - name: Save image as tarball
+        run: docker save cicd-sg:${{ github.sha}} -o ${{ runner.temp }}/image.tar
+        
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
 
       - name: Show container logs
         if: always()
@@ -72,5 +82,51 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f smoke || true
+ 
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
 
-        
+      - name: Download image artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-image
+          path: ${{ runner.temp }}
+
+      - name: Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/image.tar
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: '0'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
+
+      - name: Fail on CRITICAL/HIGH vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/image.tar
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: '1'   
