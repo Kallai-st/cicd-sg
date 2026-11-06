@@ -29,9 +29,6 @@ The runner is pinned to `ubuntu-24.04` so a change to `ubuntu-latest` can't brea
 
 `Build docker image` is a required status check on `main`, alongside `Run tests`. A pull request can only be merged if the image builds and passes the smoke test.
 
-## Lessons learned
-
-The first version of the health check used `curl --retry-connrefused`. Right after `docker run`, Docker already accepts connections on the published port, but gunicorn is not ready yet. The connection gets reset ("Connection reset by peer" / "Empty reply from server"), and `curl` does not retry those errors by default. The fix was `--retry-all-errors`, which retries every failure.
 
 ## Verify locally
 
