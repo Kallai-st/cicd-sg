@@ -1,0 +1,20 @@
+services:
+  web:
+    image: ghcr.io/kallai-st/cicd-sg:${IMAGE_TAG:-latest}
+    container_name: cicd-sg
+    ports:
+      - "80:8000"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

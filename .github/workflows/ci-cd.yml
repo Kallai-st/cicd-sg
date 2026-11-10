@@ -165,3 +165,67 @@ jobs:
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
           echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` and \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-24.04
+    needs: push-image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: http://${{ vars.DEPLOY_HOST }}
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<EOF
+          Host deploy-target
+            HostName ${DEPLOY_HOST}
+            User ${DEPLOY_USER}
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+
+      - name: Copy compose file
+        run: |
+          ssh deploy-target 'mkdir -p ~/cicd-sg'
+          scp deploy/docker-compose.yml deploy-target:cicd-sg/docker-compose.yml
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh deploy-target "cd ~/cicd-sg && echo 'IMAGE_TAG=${IMAGE_TAG}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120 && docker image prune -f"
+
+      - name: Verify deployment
+        run: |
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "http://${DEPLOY_HOST}/health"
+          echo
+          ssh deploy-target "docker inspect --format '{{.Config.Image}}' cicd-sg"
+          echo "Deployed \`ghcr.io/kallai-st/cicd-sg:${IMAGE_TAG}\` to http://${DEPLOY_HOST}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show container status on failure
+        if: failure()
+        run: ssh deploy-target "cd ~/cicd-sg && docker compose ps && docker compose logs --tail 50"
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
