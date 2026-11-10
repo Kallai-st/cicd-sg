@@ -11,6 +11,10 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 FROM python:3.12-slim
 
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH"
