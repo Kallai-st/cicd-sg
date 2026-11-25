@@ -211,6 +211,15 @@ jobs:
           ssh deploy-target 'mkdir -p ~/cicd-sg'
           scp deploy/docker-compose.yml deploy-target:cicd-sg/docker-compose.yml
 
+      - name: Record previous version
+        id: previous
+        run: |
+          PREV=$(ssh deploy-target "sed -n 's/^IMAGE_TAG=//p' ~/cicd-sg/.env 2>/dev/null" || true)
+          # Only accept a full commit SHA; anything else means "no usable previous version"
+          [[ "$PREV" =~ ^[0-9a-f]{40}$ ]] || PREV=""
+          echo "tag=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Previous version: ${PREV:-none (first deployment)}"
+
       - name: Deploy with Docker Compose
         run: |
           ssh deploy-target "cd ~/cicd-sg && echo 'IMAGE_TAG=${IMAGE_TAG}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120 && docker image prune -f"
@@ -225,6 +234,17 @@ jobs:
       - name: Show container status on failure
         if: failure()
         run: ssh deploy-target "cd ~/cicd-sg && docker compose ps && docker compose logs --tail 50"
+
+      - name: Roll back to previous version
+        if: failure() && steps.previous.outputs.tag != ''
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          echo "::warning::Deployment of ${IMAGE_TAG} failed - rolling back to ${PREVIOUS_TAG}"
+          ssh deploy-target "cd ~/cicd-sg && echo 'IMAGE_TAG=${PREVIOUS_TAG}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120"
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "http://${DEPLOY_HOST}/health"
+          echo
+          echo "Rolled back from \`${IMAGE_TAG}\` to \`${PREVIOUS_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove SSH key
         if: always()
