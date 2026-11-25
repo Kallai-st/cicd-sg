@@ -129,3 +129,60 @@ OSError: [Errno 30] Read-only file system: '/var/tmp/startup.marker'
 - **First deployment:** if the server has no valid `.env` yet, there is nothing to restore. The job fails and the rollback step is skipped.
 - **The registry is not cleaned up:** the failed image and the `latest` tag stay in GHCR. This is harmless because the server never uses `latest`, it always runs the exact commit SHA, but `latest` can point to a version that failed in production.
 - **The demonstration stays in the history:** the broken version (#26) and its revert (#27) remain in the repository history as the evidence of the test.
+
+## Follow-up: production-like smoke test
+
+The rollback demo exposed a gap between CI and production: the smoke test in the `build` job started the container with a plain `docker run`, while the server runs it with the hardening options from `deploy/docker-compose.yml`. The broken image from #26 therefore passed every required check and failed only on the server, where the rollback had to step in.
+
+To close this gap, the smoke test now starts the container with the same restrictions as production:
+
+```yaml
+docker run -d --name smoke -p 8000:8000 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true --memory 256m cicd-sg:${{ github.sha }}
+```
+
+| `docker run` flag | `docker-compose.yml` equivalent |
+|---|---|
+| `--read-only` | `read_only: true` |
+| `--tmpfs /tmp` | `tmpfs: /tmp` |
+| `--cap-drop ALL` | `cap_drop: ALL` |
+| `--security-opt no-new-privileges:true` | `security_opt: no-new-privileges:true` |
+| `--memory 256m` | `mem_limit: 256m` |
+
+### Key design decisions
+
+- **Shift left.** Rollback limits the damage of a bad release; catching the failure in the pull request prevents the release altogether. A broken image now never reaches the registry, so the `latest` tag and the server stay untouched.
+- **Rollback stays.** The smoke test cannot reproduce every difference between CI and production (network, host resources, real traffic), so automatic rollback remains the last line of defence.
+- **Flags are duplicated by hand.** The restrictions are listed both in the workflow and in the compose file. A change to one must be mirrored in the other; this is noted as a limitation below.
+
+### Demo
+
+**Setup.** The intentionally broken commit from #26 (writing to `/var/tmp` at startup) was re-applied on a throwaway `demo/` branch and opened as a pull request.
+
+**Result.** `Run tests` passed, but `Build docker image` failed in the *Smoke test - check /health endpoint* step after `curl` exhausted its retries. The container logs show the same error as on the server during the rollback demo: `OSError: [Errno 30] Read-only file system: '/var/tmp/startup.marker'`, followed by `HaltServer 'Worker failed to boot.'`. `Security scan`, `Push to GHCR` and `Deploy to VPS` were skipped, and merging was blocked by the required checks.
+
+**Outcome.** The same change that previously reached production (and triggered a rollback) is now stopped in CI. The pull request was closed without merging.
+
+### Screenshots
+
+1. Pull request with the failing `Build docker image` check and the merge blocked
+
+   [![Failed smoke test on the pull request](https://github.com/Kallai-st/cicd-sg/raw/main/docs/images/08-smoke-pr-failed.png)](https://github.com/Kallai-st/cicd-sg/blob/main/docs/images/08-smoke-pr-failed.png)
+
+   *The required `Build docker image` check fails; later jobs are skipped.*
+
+2. Health check retries failing in the smoke test
+
+   [![curl failing against /health](https://github.com/Kallai-st/cicd-sg/raw/main/docs/images/08-smoke-curl-failed.png)](https://github.com/Kallai-st/cicd-sg/blob/main/docs/images/08-smoke-curl-failed.png)
+
+   *The container starts with production-like flags, but `/health` never answers.*
+
+3. Container logs showing the root cause
+
+   [![Read-only file system error in the container logs](https://github.com/Kallai-st/cicd-sg/raw/main/docs/images/08-smoke-log-readonly.png)](https://github.com/Kallai-st/cicd-sg/blob/main/docs/images/08-smoke-log-readonly.png)
+
+   *Gunicorn workers crash on the read-only filesystem: `Worker failed to boot`.*
+
+### Limitations
+
+- The container restrictions are defined twice (workflow and compose file) and can drift apart if only one is updated.
+- The smoke test still runs on a GitHub-hosted runner, not on the target host, so host-specific issues (disk, network, kernel) remain covered only by the rollback.
