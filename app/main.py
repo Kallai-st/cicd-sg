@@ -1,13 +1,8 @@
-from pathlib import Path
-
 from flask import Flask, jsonify
 
 
 def create_app():
     app = Flask(__name__)
-
-    #demo rollback
-    Path("/var/tmp/startup.marker").write_text("started")
 
     @app.get("/")
     def index():
