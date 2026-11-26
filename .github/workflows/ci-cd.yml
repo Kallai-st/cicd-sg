@@ -11,6 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  repo-scan:
+    name: Repository scan
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+      HADOLINT_IMAGE: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan git history for secrets (gitleaks)
+        run: docker run --rm -v "${GITHUB_WORKSPACE}:/repo" "$GITLEAKS_IMAGE" git /repo --redact -v
+
+      - name: Lint Dockerfile (hadolint)
+        if: success() || failure()
+        run: docker run --rm -i "$HADOLINT_IMAGE" < Dockerfile
   test:
     name: Run tests
     runs-on: ubuntu-latest
@@ -135,7 +154,7 @@ jobs:
   push-image:
     name: Push to GHCR
     runs-on: ubuntu-24.04
-    needs: security-scan
+    needs: [security-scan, repo-scan]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
