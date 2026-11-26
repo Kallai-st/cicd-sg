@@ -1,6 +1,6 @@
 services:
   web:
-    image: ghcr.io/kallai-st/cicd-sg:${IMAGE_TAG:-latest}
+    image: ghcr.io/kallai-st/cicd-sg@${IMAGE_DIGEST:?IMAGE_DIGEST must be set in .env}
     container_name: cicd-sg
     ports:
       - "80:8000"

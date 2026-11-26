@@ -267,22 +267,29 @@ jobs:
       - name: Record previous version
         id: previous
         run: |
-          PREV=$(ssh deploy-target "sed -n 's/^IMAGE_TAG=//p' ~/cicd-sg/.env 2>/dev/null" || true)
-          # Only accept a full commit SHA; anything else means "no usable previous version"
-          [[ "$PREV" =~ ^[0-9a-f]{40}$ ]] || PREV=""
-          echo "tag=${PREV}" >> "$GITHUB_OUTPUT"
-          echo "Previous version: ${PREV:-none (first deployment)}"
+          PREV_TAG=$(ssh deploy-target "sed -n 's/^IMAGE_TAG=//p' ~/cicd-sg/.env 2>/dev/null" || true)
+          PREV_DIGEST=$(ssh deploy-target "sed -n 's/^IMAGE_DIGEST=//p' ~/cicd-sg/.env 2>/dev/null" || true)
+          # Only accept a full commit SHA and a full digest; anything else means "no usable previous version"
+          if [[ ! "$PREV_TAG" =~ ^[0-9a-f]{40}$ || ! "$PREV_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            PREV_TAG=""
+            PREV_DIGEST=""
+          fi
+          echo "tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "digest=${PREV_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Previous version: ${PREV_TAG:-none (first deployment)} ${PREV_DIGEST}"
 
       - name: Deploy with Docker Compose
         run: |
-          ssh deploy-target "cd ~/cicd-sg && echo 'IMAGE_TAG=${IMAGE_TAG}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120 && docker image prune -f"
+          ssh deploy-target "cd ~/cicd-sg && printf 'IMAGE_TAG=%s\nIMAGE_DIGEST=%s\n' '${IMAGE_TAG}' '${IMAGE_DIGEST}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120 && docker image prune -f"
 
       - name: Verify deployment
         run: |
           curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "http://${DEPLOY_HOST}/health"
           echo
-          ssh deploy-target "docker inspect --format '{{.Config.Image}}' cicd-sg"
-          echo "Deployed \`ghcr.io/kallai-st/cicd-sg:${IMAGE_TAG}\` to http://${DEPLOY_HOST}" >> "$GITHUB_STEP_SUMMARY"
+          RUNNING=$(ssh deploy-target "docker inspect --format '{{.Config.Image}}' cicd-sg")
+          echo "Running image: ${RUNNING}"
+          [[ "$RUNNING" == "${IMAGE}@${IMAGE_DIGEST}" ]] || { echo "::error::Running image does not match the verified digest"; exit 1; }
+          echo "Deployed \`${IMAGE}@${IMAGE_DIGEST}\` (commit \`${IMAGE_TAG}\`) to http://${DEPLOY_HOST}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show container status on failure
         if: failure()
@@ -292,12 +299,13 @@ jobs:
         if: failure() && steps.previous.outputs.tag != ''
         env:
           PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
         run: |
           echo "::warning::Deployment of ${IMAGE_TAG} failed - rolling back to ${PREVIOUS_TAG}"
-          ssh deploy-target "cd ~/cicd-sg && echo 'IMAGE_TAG=${PREVIOUS_TAG}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120"
+          ssh deploy-target "cd ~/cicd-sg && printf 'IMAGE_TAG=%s\nIMAGE_DIGEST=%s\n' '${PREVIOUS_TAG}' '${PREVIOUS_DIGEST}' > .env && docker compose pull && docker compose up -d --wait --wait-timeout 120"
           curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "http://${DEPLOY_HOST}/health"
           echo
-          echo "Rolled back from \`${IMAGE_TAG}\` to \`${PREVIOUS_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rolled back from \`${IMAGE_TAG}\` to \`${PREVIOUS_TAG}\` (\`${PREVIOUS_DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove SSH key
         if: always()
