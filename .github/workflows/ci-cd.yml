@@ -140,6 +140,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v8
@@ -158,13 +161,49 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag and push image
+        id: push
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
           docker tag "cicd-sg:${GITHUB_SHA}" "${IMAGE}:${GITHUB_SHA}"
           docker tag "cicd-sg:${GITHUB_SHA}" "${IMAGE}:latest"
           docker push "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:latest"
-          echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` and \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+          DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")
+          DIGEST="${DIGEST#*@}"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Could not determine image digest"; exit 1; }
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` and \`${IMAGE}:latest\` (digest \`${DIGEST}\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign image (keyless)
+        env:
+          IMAGE: ${{ steps.push.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/image.tar
+          format: cyclonedx
+          output: sbom.cdx.json
+
+      - name: Attest SBOM
+        env:
+          IMAGE: ${{ steps.push.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "${IMAGE}@${DIGEST}"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          retention-days: 30
 
   deploy:
     name: Deploy to VPS
@@ -184,9 +223,23 @@ jobs:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
       IMAGE_TAG: ${{ github.sha }}
+      IMAGE: ghcr.io/kallai-st/cicd-sg
+      IMAGE_DIGEST: ${{ needs.push-image.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Verify image signature and SBOM attestation
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Missing or invalid image digest"; exit 1; }
+          IDENTITY="https://github.com/Kallai-st/cicd-sg/.github/workflows/ci-cd.yml@refs/heads/main"
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "${IMAGE}@${IMAGE_DIGEST}" > /dev/null
+          cosign verify-attestation --type cyclonedx --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "${IMAGE}@${IMAGE_DIGEST}" > /dev/null
+          echo "Verified signature and SBOM attestation of \`${IMAGE}@${IMAGE_DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configure SSH
         env:
